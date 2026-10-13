@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live RGB-D SLAM</title>
+<style>
+  /* Chalk marketing palette: green-1 ground, chartreuse primary, mint accents. */
+  :root { --bg:#224A41; --panel:#1C3B34; --line:#32645B; --ink:#EFF5F3; --muted:#B9CFC7;
+          --accent:#BBD96D; --mint:#70CD96; --warn:#F8947F; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; padding:32px 16px; }
+  html.embed body { padding:20px; }
+  html.embed header { display:none; }
+  .wrap { max-width:1100px; margin:0 auto; display:flex; flex-direction:column; gap:16px; }
+  .mono { font-family:ui-monospace,"SFMono-Regular",Menlo,monospace; text-transform:uppercase;
+          letter-spacing:.06em; font-size:12px; }
+  h1 { font-size:22px; font-weight:500; margin:0 0 4px; letter-spacing:-0.3px; }
+  header p { color:var(--muted); margin:0; font-size:14px; }
+  .bar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  button { font:13px/15px ui-monospace,"SFMono-Regular",Menlo,monospace; text-transform:uppercase;
+           letter-spacing:.06em; border:1px solid var(--accent); border-radius:20px; padding:12px 22px;
+           cursor:pointer; background:var(--accent); color:var(--bg); white-space:nowrap; }
+  button:hover { background:transparent; color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { color:var(--muted); }
+  #status b { color:var(--ink); font-weight:500; }
+  .grid { display:grid; grid-template-columns:1fr 240px; gap:16px; }
+  @media (max-width:760px) { .grid { grid-template-columns:1fr; } }
+  #view { position:relative; height:520px; background:#173029; border:1px solid var(--line);
+          border-radius:4px; overflow:hidden; }
+  @media (max-width:760px) { #view { height:380px; } }
+  #view canvas { display:block; width:100%; height:100%; }
+  #hint { position:absolute; left:12px; bottom:10px; color:var(--muted); pointer-events:none; }
+  #legend { position:absolute; right:12px; top:10px; display:flex; flex-direction:column; gap:4px;
+            color:var(--muted); pointer-events:none; }
+  #legend i { display:inline-block; width:14px; height:3px; margin-right:6px; vertical-align:middle; }
+  .side { display:flex; flex-direction:column; gap:12px; min-width:0; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:12px; }
+  .card h2 { margin:0 0 8px; color:var(--muted); font-weight:400; }
+  #thumb { width:100%; aspect-ratio:4/3; background:#173029; border-radius:2px; display:block; object-fit:cover; }
+  .stat { display:flex; justify-content:space-between; gap:8px; padding:3px 0; font-size:14px; }
+  .stat span:first-child { color:var(--muted); }
+  #fit { width:100%; height:44px; display:block; }
+  .toggles label { display:flex; gap:8px; align-items:center; font-size:14px; color:var(--muted); cursor:pointer; padding:2px 0; }
+  .toggles input { accent-color:var(--mint); }
+  #result { color:var(--accent); }
+</style>
+<script>
+  if (new URLSearchParams(location.search).has("embed")) document.documentElement.classList.add("embed");
+</script>
+<script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Live RGB-D SLAM</h1>
+    <p>A depth camera walks around an office. The GPU works out where the camera is and builds a 3D map of the room, both at once, frame by frame.</p>
+  </header>
+  <div class="bar">
+    <button id="go">Start mapping</button>
+    <div id="status" class="mono">TUM RGB-D · fr3/long_office_household</div>
+  </div>
+  <div class="grid">
+    <div id="view">
+      <div id="legend" class="mono">
+        <span><i style="background:#BBD96D"></i>Tracked camera path</span>
+        <span id="gtLegend" style="display:none"><i style="background:#70CD96"></i>Ground truth (mocap)</span>
+      </div>
+      <div id="hint" class="mono">Drag to orbit · scroll to zoom</div>
+    </div>
+    <div class="side">
+      <div class="card">
+        <h2 class="mono">Camera feed</h2>
+        <img id="thumb" alt="Current RGB frame">
+      </div>
+      <div class="card">
+        <h2 class="mono">Tracking</h2>
+        <div class="stat"><span>Frame</span><span id="sFrame">–</span></div>
+        <div class="stat"><span>GPU time / frame</span><span id="sMs">–</span></div>
+        <div class="stat"><span>Fitness</span><span id="sFit">–</span></div>
+        <canvas id="fit"></canvas>
+        <div class="stat"><span>Map points</span><span id="sPts">–</span></div>
+        <div class="stat" id="result"></div>
+      </div>
+      <div class="card toggles">
+        <label><input type="checkbox" id="tFused" checked disabled> Fused surface (at end)</label>
+        <label><input type="checkbox" id="tGt" checked disabled> Ground truth</label>
+        <label><input type="checkbox" id="tFollow" checked> Follow camera</label>
+      </div>
+    </div>
+  </div>
+</div>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const $ = (id) => document.getElementById(id);
+const view = $("view");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+renderer.setClearColor(0x173029);
+view.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 100);
+camera.position.set(0, 1.6, 3.2);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+// The camera frame is x right, y down, z forward; flip y and z so "up" is up on screen.
+const world = new THREE.Group();
+world.rotation.x = Math.PI;
+scene.add(world);
+
+const MAX_RAW = 900000;
+function pointCloud(capacity, size) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(new Uint8Array(capacity * 3), 3, true));
+  geo.setDrawRange(0, 0);
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({ size, vertexColors: true, sizeAttenuation: true }));
+  pts.frustumCulled = false;
+  world.add(pts);
+  return pts;
+}
+function polyline(capacity, color) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
+  geo.setDrawRange(0, 0);
+  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
+  line.frustumCulled = false;
+  world.add(line);
+  return line;
+}
+const raw = pointCloud(MAX_RAW, 0.012);
+let fused = null;
+const path = polyline(4000, 0xbbd96d);
+const truth = polyline(2000, 0x70cd96);
+
+// A small camera frustum that rides along the tracked pose.
+const frustum = new THREE.LineSegments(
+  new THREE.BufferGeometry().setFromPoints([
+    [0,0,0],[.12,.09,.2], [0,0,0],[-.12,.09,.2], [0,0,0],[.12,-.09,.2], [0,0,0],[-.12,-.09,.2],
+    [.12,.09,.2],[-.12,.09,.2], [-.12,.09,.2],[-.12,-.09,.2], [-.12,-.09,.2],[.12,-.09,.2], [.12,-.09,.2],[.12,.09,.2],
+  ].map((p) => new THREE.Vector3(...p))),
+  new THREE.LineBasicMaterial({ color: 0xbbd96d }));
+frustum.matrixAutoUpdate = false;
+frustum.visible = false;
+world.add(frustum);
+
+function resize() {
+  const w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(view);
+resize();
+
+const target = new THREE.Vector3();
+const tmp = new THREE.Vector3();
+(function animate() {
+  requestAnimationFrame(animate);
+  if ($("tFollow").checked && frustum.visible) {
+    tmp.setFromMatrixPosition(frustum.matrixWorld);
+    target.lerp(tmp, 0.06);
+    const delta = target.clone().sub(controls.target);
+    controls.target.add(delta);
+    camera.position.add(delta);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+})();
+
+function decodePoints(p) {
+  const mm = new Int16Array(Uint8Array.from(atob(p.xyz), (c) => c.charCodeAt(0)).buffer);
+  const rgb = Uint8Array.from(atob(p.rgb), (c) => c.charCodeAt(0));
+  return { mm, rgb, count: p.count };
+}
+function appendPoints(cloud, p) {
+  const { mm, rgb, count } = decodePoints(p);
+  const geo = cloud.geometry;
+  const start = geo.drawRange.count;
+  const n = Math.min(count, MAX_RAW - start);
+  const pos = geo.attributes.position.array, col = geo.attributes.color.array;
+  for (let i = 0; i < n * 3; i++) { pos[start * 3 + i] = mm[i] / 1000; col[start * 3 + i] = rgb[i]; }
+  geo.setDrawRange(0, start + n);
+  geo.attributes.position.needsUpdate = true;
+  geo.attributes.color.needsUpdate = true;
+  return start + n;
+}
+function pushLine(line, xyz) {
+  const geo = line.geometry, n = geo.drawRange.count, arr = geo.attributes.position.array;
+  if (n * 3 + 3 > arr.length) return;
+  arr.set(xyz, n * 3);
+  geo.setDrawRange(0, n + 1);
+  geo.attributes.position.needsUpdate = true;
+}
+
+// Fitness sparkline: how well each frame's depth lined up with the map (1 = perfectly).
+const fitCanvas = $("fit"), fitCtx = fitCanvas.getContext("2d");
+let fits = [];
+function drawFit() {
+  const w = fitCanvas.width = fitCanvas.clientWidth * 2, h = fitCanvas.height = fitCanvas.clientHeight * 2;
+  fitCtx.clearRect(0, 0, w, h);
+  fitCtx.strokeStyle = "#70CD96"; fitCtx.lineWidth = 2; fitCtx.beginPath();
+  fits.forEach((f, i) => { const x = (i / Math.max(1, fits.length - 1)) * w, y = h - f * h;
+    i ? fitCtx.lineTo(x, y) : fitCtx.moveTo(x, y); });
+  fitCtx.stroke();
+}
+
+// Pull the view back so the whole fused map is in frame, looking down at it from above and behind.
+function frameMap(cloud) {
+  $("tFollow").checked = false;
+  cloud.geometry.computeBoundingSphere();
+  const sphere = cloud.geometry.boundingSphere.clone().applyMatrix4(world.matrixWorld);
+  controls.target.copy(sphere.center);
+  target.copy(sphere.center);
+  camera.position.copy(sphere.center).add(new THREE.Vector3(0, sphere.radius * 1.1, sphere.radius * 1.5));
+}
+
+function reset() {
+  raw.geometry.setDrawRange(0, 0);
+  path.geometry.setDrawRange(0, 0);
+  truth.geometry.setDrawRange(0, 0);
+  if (fused) { world.remove(fused); fused.geometry.dispose(); fused = null; }
+  raw.visible = true; truth.visible = true; frustum.visible = false;
+  $("tFollow").checked = true;
+  fits = []; drawFit();
+  ["tFused", "tGt"].forEach((id) => { $(id).disabled = true; $(id).checked = true; });
+  $("gtLegend").style.display = "none";
+  $("result").textContent = "";
+  ["sFrame", "sMs", "sFit", "sPts"].forEach((id) => ($(id).textContent = "–"));
+}
+
+let total = 0, replay = false;
+function onEvent(e) {
+  if (e.type === "busy") {
+    $("status").textContent = "The GPU is busy with another run. Try again in a few seconds.";
+  } else if (e.type === "start") {
+    total = e.frames; replay = !!e.replay;
+    $("status").innerHTML = "";
+    $("status").append(replay ? "Replaying the last run while the GPU is busy · " : "Mapping on ",
+      Object.assign(document.createElement("b"), { textContent: e.device }), ` · ${e.frames} frames`);
+  } else if (e.type === "frame") {
+    const m = new THREE.Matrix4().fromArray(e.pose).transpose();
+    frustum.matrix.copy(m); frustum.visible = true;
+    pushLine(path, [e.pose[3], e.pose[7], e.pose[11]]);
+    if (e.points) $("sPts").textContent = appendPoints(raw, e.points).toLocaleString();
+    if (e.thumb) $("thumb").src = "data:image/jpeg;base64," + e.thumb;
+    fits.push(e.fitness); if (e.i % 4 === 0) drawFit();
+    $("sFrame").textContent = `${e.i + 1} / ${total}`;
+    $("sMs").textContent = `${e.ms} ms`;
+    $("sFit").textContent = e.fitness.toFixed(2);
+  } else if (e.type === "done") {
+    drawFit();
+    fused = pointCloud(e.map.count, 0.008);
+    appendPoints(fused, e.map);
+    raw.visible = false;
+    $("tFused").disabled = false;
+    frameMap(fused);
+    $("sPts").textContent = `${e.map.count.toLocaleString()} fused`;
+    if (e.ground_truth) {
+      e.ground_truth.forEach((p) => pushLine(truth, p));
+      $("tGt").disabled = false; $("gtLegend").style.display = "";
+      $("result").textContent = `ATE ${e.ate_cm} cm over a ${e.path_m} m path`;
+    }
+    $("status").textContent = `${replay ? "Replayed" : "Mapped"} ${e.frames} frames in ${e.slam_seconds} s of SLAM time · ` +
+      `${(e.frames / e.slam_seconds).toFixed(0)} frames/s`;
+  }
+}
+
+async function run() {
+  $("go").disabled = true;
+  reset();
+  $("status").textContent = "Connecting to the GPU…";
+  try {
+    const res = await fetch("api/run");
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (line) onEvent(JSON.parse(line));
+      }
+    }
+  } catch (err) {
+    $("status").textContent = "Connection lost: " + err.message;
+  } finally {
+    $("go").disabled = false;
+    $("go").textContent = "Map it again";
+  }
+}
+$("go").onclick = run;
+$("tFused").onchange = (ev) => { if (fused) { fused.visible = ev.target.checked; raw.visible = !ev.target.checked; } };
+$("tGt").onchange = (ev) => { truth.visible = ev.target.checked; };
+
+// Embedded in another page: report our height so the parent can size the iframe to fit.
+if (document.documentElement.classList.contains("embed") && window.parent !== window) {
+  const report = () => window.parent.postMessage(
+    { type: "chalk-demo-height", height: Math.ceil(document.body.getBoundingClientRect().height) }, "*");
+  new ResizeObserver(report).observe(document.body);
+  report();
+}
+</script>
+</body>
+</html>

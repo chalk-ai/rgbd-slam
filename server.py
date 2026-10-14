@@ -4,7 +4,8 @@ GET  /             the 3D viewer (index.html)
 GET  /api/status   sequence, device and whether a run is in progress
 GET  /api/run      newline-delimited JSON events for one SLAM run:
                    {"type": "start", ...}, one {"type": "frame", ...} per frame,
-                   then {"type": "done", ...} with the fused map and trajectory error
+                   then {"type": "done", ...} with the mesh's URL and trajectory error
+GET  /api/mesh/ID  the reconstructed surface of a run as a packed binary mesh (see pack_mesh)
 
 The GPU runs one SLAM pass at a time. A request that arrives while one is in progress gets a
 replay of the most recent completed run (marked "replay": true) instead of waiting.
@@ -22,13 +23,15 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator
+from collections import OrderedDict
+from typing import Any, AsyncIterator, Callable, Iterator
 
 import numpy as np
 import open3d as o3d
 import open3d.core as o3c
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from PIL import Image
 
 import slam
@@ -43,7 +46,8 @@ POINTS_EVERY = 3
 POINTS_PER_FRAME = 1600
 THUMB_EVERY = 3
 THUMB_SIZE = (160, 120)
-MAP_POINTS = 400_000
+# Meshes of the most recent runs, so a replay can still fetch the surface it points at.
+KEPT_MESHES = 3
 GT_POINTS = 600
 
 log = logging.getLogger("slam")
@@ -64,6 +68,22 @@ def pack_points(points: np.ndarray, colors: np.ndarray) -> dict[str, str | int]:
     }
 
 
+def pack_mesh(positions: np.ndarray, colors: np.ndarray, faces: np.ndarray) -> bytes:
+    """Little-endian binary mesh, every section starting on a 4-byte boundary:
+
+    uint32 vertex count, uint32 triangle count, int16[3V] positions in millimetres,
+    uint8[3V] RGB colours, uint32[3T] vertex indices.
+    """
+
+    def pad4(b: bytes) -> bytes:
+        return b + b"\0" * (-len(b) % 4)
+
+    header = np.array([len(positions), len(faces)], dtype="<u4").tobytes()
+    mm = np.clip(np.round(positions * 1000.0), -32767, 32767).astype("<i2").tobytes()
+    rgb = np.clip(colors * 255.0, 0, 255).astype(np.uint8).tobytes()
+    return header + pad4(mm) + pad4(rgb) + faces.astype("<u4").tobytes()
+
+
 def thumbnail(path: Path) -> str:
     img = Image.open(path).convert("RGB").resize(THUMB_SIZE)
     buf = io.BytesIO()
@@ -75,8 +95,9 @@ def device() -> o3c.Device:
     return o3c.Device("CUDA:0") if o3d.core.cuda.is_available() else o3c.Device("CPU:0")
 
 
-def run_slam(seq: slam.Sequence) -> Iterator[dict[str, Any]]:
-    """One full SLAM pass over `seq`, as JSON-ready events."""
+def run_slam(seq: slam.Sequence, store_mesh: Callable[[bytes], str]) -> Iterator[dict[str, Any]]:
+    """One full SLAM pass over `seq`, as JSON-ready events. The reconstructed mesh is handed to
+    `store_mesh`, which returns the id it can be fetched under."""
     dev = device()
     run = slam.DenseSlam(seq, dev)
     n = len(seq.timestamps)
@@ -106,14 +127,18 @@ def run_slam(seq: slam.Sequence) -> Iterator[dict[str, Any]]:
             event["thumb"] = thumbnail(seq.color_files[r.index])
         yield event
 
+    t_mesh = time.perf_counter()
+    positions, colors, faces = run.mesh()
+    mesh_id = store_mesh(pack_mesh(positions, colors, faces))
     estimated = np.array([p[:3, 3] for p in run.poses])
     truth = slam.ground_truth_trajectory(seq, len(estimated))
     done: dict[str, Any] = {
         "type": "done",
         "frames": n,
         "slam_seconds": round(slam_seconds, 2),
+        "mesh_seconds": round(time.perf_counter() - t_mesh, 2),
         "wall_seconds": round(time.perf_counter() - t0, 2),
-        "map": pack_points(*run.map_points(MAP_POINTS)),
+        "mesh": {"url": f"api/mesh/{mesh_id}", "vertices": len(positions), "triangles": len(faces)},
     }
     if truth is not None:
         aligned, ate = slam.align_and_ate(estimated, truth)
@@ -131,7 +156,7 @@ state: dict[str, Any] = {}
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     seq = slam.load_sequence(SEQUENCE_DIR, STRIDE)
     log.info("loaded %s: %d frames, device %s", seq.name, len(seq.timestamps), device())
-    state.update(sequence=seq, lock=threading.Lock(), last_run=None)
+    state.update(sequence=seq, lock=threading.Lock(), last_run=None, meshes=OrderedDict())
     # Warm up the CUDA kernels on a short prefix so the first visitor's run starts at full speed.
     warm = slam.Sequence(
         **{
@@ -141,7 +166,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             "color_files": seq.color_files[:5],
         }
     )
-    await asyncio.to_thread(lambda: [e for e in run_slam(warm) if e["type"] == "done"])
+    await asyncio.to_thread(lambda: [e for e in run_slam(warm, lambda _: "warmup") if e["type"] == "done"])
     log.info("warm-up done")
     yield
 
@@ -163,6 +188,23 @@ async def status() -> JSONResponse:
     )
 
 
+def store_mesh(blob: bytes) -> str:
+    meshes: OrderedDict[str, bytes] = state["meshes"]
+    mesh_id = f"{time.time_ns():x}"
+    meshes[mesh_id] = blob
+    while len(meshes) > KEPT_MESHES:
+        meshes.popitem(last=False)
+    return mesh_id
+
+
+@app.get("/api/mesh/{mesh_id}")
+async def mesh(mesh_id: str) -> Response:
+    blob = state["meshes"].get(mesh_id)
+    if blob is None:
+        raise HTTPException(404, "mesh expired; run SLAM again")
+    return Response(blob, media_type="application/octet-stream", headers={"Cache-Control": "max-age=3600"})
+
+
 @app.get("/api/run")
 async def run() -> StreamingResponse:
     lock: threading.Lock = state["lock"]
@@ -175,7 +217,7 @@ async def run() -> StreamingResponse:
     def live() -> None:
         recorded: list[str] = []
         try:
-            for event in run_slam(seq):
+            for event in run_slam(seq, store_mesh):
                 line = json.dumps(event, separators=(",", ":")) + "\n"
                 recorded.append(line)
                 asyncio.run_coroutine_threadsafe(queue.put(line), loop).result()

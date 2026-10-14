@@ -85,11 +85,11 @@
         <div class="stat"><span>GPU time / frame</span><span id="sMs">–</span></div>
         <div class="stat"><span>Fitness</span><span id="sFit">–</span></div>
         <canvas id="fit"></canvas>
-        <div class="stat"><span>Map points</span><span id="sPts">–</span></div>
+        <div class="stat"><span>Map</span><span id="sPts">–</span></div>
         <div class="stat" id="result"></div>
       </div>
       <div class="card toggles">
-        <label><input type="checkbox" id="tFused" checked disabled> Fused surface (at end)</label>
+        <label><input type="checkbox" id="tFused" checked disabled> Reconstructed mesh</label>
         <label><input type="checkbox" id="tGt" checked disabled> Ground truth</label>
         <label><input type="checkbox" id="tFollow" checked> Follow camera</label>
       </div>
@@ -113,6 +113,12 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
 // The camera frame is x right, y down, z forward; flip y and z so "up" is up on screen.
+// Soft sky/ground fill plus one key light, so the reconstructed mesh reads as solid geometry.
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445544, 2.2));
+const key = new THREE.DirectionalLight(0xffffff, 1.4);
+key.position.set(2, 4, 3);
+scene.add(key);
+
 const world = new THREE.Group();
 world.rotation.x = Math.PI;
 scene.add(world);
@@ -214,6 +220,36 @@ function drawFit() {
   fitCtx.stroke();
 }
 
+// Parses the server's packed mesh (see pack_mesh in server.py) into a lit, vertex-coloured mesh.
+function meshFromBuffer(buf) {
+  const [nv, nt] = new Uint32Array(buf, 0, 2);
+  const pad4 = (n) => n + ((4 - (n % 4)) % 4);
+  const posOff = 8, colOff = posOff + pad4(nv * 6), idxOff = colOff + pad4(nv * 3);
+  const mm = new Int16Array(buf, posOff, nv * 3);
+  const positions = new Float32Array(nv * 3);
+  for (let i = 0; i < nv * 3; i++) positions[i] = mm[i] / 1000;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(new Uint8Array(buf, colOff, nv * 3), 3, true));
+  geo.setIndex(new THREE.BufferAttribute(new Uint32Array(buf, idxOff, nt * 3), 1));
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+async function loadMesh(info) {
+  $("sPts").textContent = "reconstructing…";
+  const res = await fetch(info.url);
+  if (!res.ok) throw new Error(`mesh HTTP ${res.status}`);
+  fused = meshFromBuffer(await res.arrayBuffer());
+  world.add(fused);
+  raw.visible = false;
+  $("tFused").disabled = false;
+  frameMap(fused);
+  $("sPts").textContent = `${Math.round(info.triangles / 1000)}k triangles`;
+}
+
 // Pull the view back so the whole fused map is in frame, looking down at it from above and behind.
 function frameMap(cloud) {
   $("tFollow").checked = false;
@@ -251,7 +287,7 @@ function onEvent(e) {
     const m = new THREE.Matrix4().fromArray(e.pose).transpose();
     frustum.matrix.copy(m); frustum.visible = true;
     pushLine(path, [e.pose[3], e.pose[7], e.pose[11]]);
-    if (e.points) $("sPts").textContent = appendPoints(raw, e.points).toLocaleString();
+    if (e.points) $("sPts").textContent = `${appendPoints(raw, e.points).toLocaleString()} points`;
     if (e.thumb) $("thumb").src = "data:image/jpeg;base64," + e.thumb;
     fits.push(e.fitness); if (e.i % 4 === 0) drawFit();
     $("sFrame").textContent = `${e.i + 1} / ${total}`;
@@ -259,19 +295,14 @@ function onEvent(e) {
     $("sFit").textContent = e.fitness.toFixed(2);
   } else if (e.type === "done") {
     drawFit();
-    fused = pointCloud(e.map.count, 0.008);
-    appendPoints(fused, e.map);
-    raw.visible = false;
-    $("tFused").disabled = false;
-    frameMap(fused);
-    $("sPts").textContent = `${e.map.count.toLocaleString()} fused`;
+    loadMesh(e.mesh).catch((err) => { $("sPts").textContent = "mesh unavailable"; console.error(err); });
     if (e.ground_truth) {
       e.ground_truth.forEach((p) => pushLine(truth, p));
       $("tGt").disabled = false; $("gtLegend").style.display = "";
       $("result").textContent = `ATE ${e.ate_cm} cm over a ${e.path_m} m path`;
     }
     $("status").textContent = `${replay ? "Replayed" : "Mapped"} ${e.frames} frames in ${e.slam_seconds} s of SLAM time · ` +
-      `${(e.frames / e.slam_seconds).toFixed(0)} frames/s`;
+      `${(e.frames / e.slam_seconds).toFixed(0)} frames/s · mesh in ${e.mesh_seconds} s`;
   }
 }
 

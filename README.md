@@ -11,13 +11,14 @@ The camera is the handheld Kinect from the TUM RGB-D benchmark's
 2. **Map.** The frame is fused into a TSDF voxel grid at that pose, so the map gets denser and
    cleaner as the camera moves.
 
-The browser shows the map growing, the camera's path and its view. When the run ends it switches
-to the fused surface and compares the tracked path with the dataset's motion-capture ground truth.
+The browser shows the map growing, the camera's path and its view. When the run ends, marching
+cubes turns the fused TSDF into a coloured triangle mesh of the office. The viewer swaps the raw
+points for that mesh and compares the tracked path with the dataset's motion-capture ground truth.
 
 | File | Role |
 | --- | --- |
 | `slam.py` | Sequence loading, the track-then-integrate loop (Open3D's tensor SLAM pipeline), and trajectory error. |
-| `server.py` | FastAPI app. `GET /api/run` streams one SLAM run as newline-delimited JSON. |
+| `server.py` | FastAPI app. `GET /api/run` streams one SLAM run as newline-delimited JSON; `GET /api/mesh/<id>` serves the reconstructed mesh. |
 | `index.html` | three.js viewer: streamed points, camera path and frustum, camera feed, tracking stats. |
 | `deploy.py` | Builds the GPU image with the sequence baked in and deploys a `chalkcompute.ScalingGroup`. |
 
@@ -53,9 +54,16 @@ absolute trajectory error of 6.8 cm over the 22 m path.
 | --- | --- |
 | `start` | `sequence`, `frames`, `stride`, `device`, `intrinsics`; `replay: true` when replaying |
 | `frame` | `i`, `pose` (row-major 4×4 camera-to-map), `fitness`, `ms`, and every few frames `points` and a JPEG `thumb` |
-| `done` | `map` (fused surface points), `ate_cm`, `path_m`, aligned `ground_truth` positions, timings |
+| `done` | `mesh` (`url`, `vertices`, `triangles`), `ate_cm`, `path_m`, aligned `ground_truth` positions, timings |
 
-Points are base64: positions as little-endian int16 millimetres, colours as uint8 RGB.
+Points are base64: positions as little-endian int16 millimetres, colours as uint8 RGB. The mesh at
+`mesh.url` is one binary blob: uint32 vertex and triangle counts, int16 millimetre positions, uint8
+RGB colours, and uint32 triangle indices, each section padded to 4 bytes. The extraction steps:
+
+- **Marching cubes:** on this sequence it yields about 5M triangles.
+- **Simplification:** 2 cm vertex clustering brings that to a few hundred thousand, which a browser
+  renders smoothly.
+- **Cleanup:** small disconnected fragments are dropped.
 
 ## Notes
 

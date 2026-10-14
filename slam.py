@@ -26,6 +26,12 @@ BLOCK_RESOLUTION = 16
 BLOCK_COUNT = 40_000
 TRUNC_VOXEL_MULTIPLIER = 8.0
 ODOMETRY_DISTANCE_THR = 0.07
+# Mesh extraction: voxels observed fewer times than this are treated as noise, the mesh is
+# simplified by merging vertices within this many metres, and fragments with fewer triangles than
+# this are dropped.
+MESH_WEIGHT_THRESHOLD = 3.0
+MESH_CLUSTER_M = 0.02
+MESH_MIN_COMPONENT_TRIANGLES = 300
 # Frames whose depth and colour timestamps differ by more than this are not paired.
 MAX_ASSOCIATION_DT_S = 0.02
 
@@ -173,15 +179,30 @@ class DenseSlam:
             pts, cols = pts[keep], cols[keep]
         return pts.astype(np.float32), cols.astype(np.float32)
 
-    def map_points(self, max_points: int) -> tuple[np.ndarray, np.ndarray]:
-        """The fused TSDF surface as a coloured point cloud, subsampled to `max_points`."""
-        pcd = self.model.voxel_grid.extract_point_cloud().cpu()
-        pts = pcd.point.positions.numpy()
-        cols = pcd.point.colors.numpy()
-        if len(pts) > max_points:
-            keep = np.random.default_rng(0).choice(len(pts), max_points, replace=False)
-            pts, cols = pts[keep], cols[keep]
-        return pts.astype(np.float32), cols.astype(np.float32)
+    def mesh(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The fused TSDF surface as a coloured triangle mesh: (positions, colours, faces).
+
+        Marching cubes yields ~5M triangles at this voxel size. Vertex clustering brings that to a
+        few hundred thousand, a size a browser renders smoothly, and dropping small disconnected
+        pieces removes floaters left by noisy depth at object edges.
+        """
+        mesh = self.model.voxel_grid.extract_triangle_mesh(weight_threshold=MESH_WEIGHT_THRESHOLD)
+        mesh = (
+            mesh.cpu()
+            .to_legacy()
+            .simplify_vertex_clustering(
+                voxel_size=MESH_CLUSTER_M, contraction=o3d.geometry.SimplificationContraction.Average
+            )
+        )
+        mesh.remove_degenerate_triangles()
+        ids, counts, _ = mesh.cluster_connected_triangles()
+        mesh.remove_triangles_by_mask(np.asarray(counts)[np.asarray(ids)] < MESH_MIN_COMPONENT_TRIANGLES)
+        mesh.remove_unreferenced_vertices()
+        return (
+            np.asarray(mesh.vertices, dtype=np.float32),
+            np.asarray(mesh.vertex_colors, dtype=np.float32),
+            np.asarray(mesh.triangles, dtype=np.uint32),
+        )
 
 
 def ground_truth_trajectory(seq: Sequence, count: int) -> np.ndarray | None:

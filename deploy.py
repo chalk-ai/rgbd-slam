@@ -85,7 +85,9 @@ def main() -> None:
         .apt_install(["libidn2-0"])
         .add_local_file(str(HERE / "slam.py"), "/app/slam.py", strategy="copy")
         .add_local_file(str(HERE / "server.py"), "/app/server.py", strategy="copy")
-        .add_local_file(str(HERE / "index.html"), "/app/index.html", strategy="copy")
+        # strategy="copy" caps the image's copied files at 32 KiB in total, so the viewer goes in
+        # through a volume. It mounts its own directory, so it cannot shadow the copied /app.
+        .add_local_file(str(HERE / "index.html"), "/web/index.html", strategy="volume")
         .workdir("/app")
     )
 
@@ -95,7 +97,11 @@ def main() -> None:
         gpu=args.gpu,
         cpu="4",
         memory="16Gi",
-        env={"SLAM_SEQUENCE_DIR": f"/data/{SEQUENCE}", "SLAM_STRIDE": str(args.stride)},
+        env={
+            "SLAM_SEQUENCE_DIR": f"/data/{SEQUENCE}",
+            "SLAM_STRIDE": str(args.stride),
+            "SLAM_INDEX_HTML": "/web/index.html",
+        },
         entrypoint=ENTRYPOINT,
         port=8080,
         readiness_probe=ReadinessProbe.http("/api/status"),

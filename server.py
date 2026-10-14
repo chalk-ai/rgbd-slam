@@ -39,7 +39,7 @@ import slam
 SEQUENCE_DIR = Path(os.environ.get("SLAM_SEQUENCE_DIR", "/data/rgbd_dataset_freiburg3_long_office_household"))
 STRIDE = int(os.environ.get("SLAM_STRIDE", "2"))
 PORT = int(os.environ.get("PORT", "8080"))
-INDEX_HTML = Path(__file__).with_name("index.html")
+INDEX_HTML = Path(os.environ.get("SLAM_INDEX_HTML", str(Path(__file__).with_name("index.html"))))
 
 # Per-frame payload budget: points from every Nth frame, plus a thumbnail every Mth frame.
 POINTS_EVERY = 3

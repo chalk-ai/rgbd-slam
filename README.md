@@ -25,8 +25,7 @@ points for that mesh and compares the tracked path with the dataset's motion-cap
 ## Run it
 
 You need [`uv`](https://docs.astral.sh/uv/) and a Chalk environment that can schedule an L4 GPU.
-Credentials come from the SDK’s ambient credentials from `chalk login`, or from `CHALK_API_SERVER`,
-`CHALK_CLIENT_ID`, `CHALK_CLIENT_SECRET` and `CHALK_ENVIRONMENT_ID`.
+Credentials come from your existing `chalk login`.
 
 ```bash
 ./deploy.py

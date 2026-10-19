@@ -25,7 +25,7 @@ points for that mesh and compares the tracked path with the dataset's motion-cap
 ## Run it
 
 You need [`uv`](https://docs.astral.sh/uv/) and a Chalk environment that can schedule an L4 GPU.
-Credentials come from `chalk config` in the current directory, or from `CHALK_API_SERVER`,
+Credentials come from the SDK’s ambient credentials from `chalk login`, or from `CHALK_API_SERVER`,
 `CHALK_CLIENT_ID`, `CHALK_CLIENT_SECRET` and `CHALK_ENVIRONMENT_ID`.
 
 ```bash
@@ -82,3 +82,10 @@ RGB colours, and uint32 triangle indices, each section padded to 4 bytes. The ex
 The code is Apache-2.0. [Open3D](https://www.open3d.org) is MIT. The RGB-D sequence is from the
 [TUM RGB-D benchmark](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) by Sturm et al.,
 licensed CC BY 4.0.
+
+## Local authentication
+
+The SDK reads credentials, API host, and the selected environment from your existing
+`chalk login` in `~/.chalk.yml`, including project-scoped and default logins.
+For unattended runs, `CHALK_CLIENT_ID` and `CHALK_CLIENT_SECRET` remain supported. Where available, `--env-id`
+overrides the target environment; otherwise the SDK uses your login or environment settings.

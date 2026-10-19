@@ -9,7 +9,7 @@
 The image bakes in the TUM RGB-D `fr3/long_office_household` sequence, so a run reads frames
 from local disk and the GPU is the only bottleneck.
 
-Credentials come from `chalk config` in the current directory (or the CHALK_* env vars):
+Credentials come from your existing `chalk login` (or the CHALK_* env vars):
     ./deploy.py [--env-id <environment>] [--gpu nvidia-l4] [--stride 2]
 Then open the printed URL and press "Start mapping".
 """
@@ -17,9 +17,7 @@ Then open the printed URL and press "Start mapping".
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import subprocess
 import time
 from pathlib import Path
 
@@ -37,17 +35,6 @@ ENTRYPOINT = [
 ]
 
 
-def load_chalk_env(env_id: str | None) -> None:
-    if "CHALK_CLIENT_ID" not in os.environ:
-        cfg = json.loads(subprocess.check_output(["chalk", "config", "--json"]))
-        os.environ["CHALK_API_SERVER"] = cfg["apiServer"]["value"]
-        os.environ["CHALK_CLIENT_ID"] = cfg["clientId"]["value"]
-        os.environ["CHALK_CLIENT_SECRET"] = cfg["clientSecret"]["value"]
-        os.environ.setdefault("CHALK_ENVIRONMENT_ID", cfg["environment"]["value"])
-    if env_id:
-        os.environ["CHALK_ENVIRONMENT_ID"] = env_id
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", default="rgbd-slam")
@@ -58,7 +45,8 @@ def main() -> None:
     parser.add_argument("--ready-timeout", type=float, default=1800.0)
     args = parser.parse_args()
 
-    load_chalk_env(args.env_id)
+    if args.env_id:
+        os.environ["CHALK_ENVIRONMENT"] = args.env_id
     from chalkcompute import Image, ReadinessProbe, ScalingGroup
 
     image = (

@@ -10,14 +10,12 @@ The image bakes in the TUM RGB-D `fr3/long_office_household` sequence, so a run 
 from local disk and the GPU is the only bottleneck.
 
 Credentials come from your existing `chalk login` (or the CHALK_* env vars):
-    ./deploy.py [--env-id <environment>] [--gpu nvidia-l4] [--stride 2]
+    ./deploy.py
 Then open the printed URL and press "Start mapping".
 """
 
 from __future__ import annotations
 
-import argparse
-import os
 import time
 from pathlib import Path
 
@@ -36,17 +34,8 @@ ENTRYPOINT = [
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--name", default="rgbd-slam")
-    parser.add_argument("--env-id", default=None)
-    parser.add_argument("--gpu", default="nvidia-l4")
     # Every 2nd frame (15 fps) tracks the full loop without losing the camera.
-    parser.add_argument("--stride", type=int, default=2)
-    parser.add_argument("--ready-timeout", type=float, default=1800.0)
-    args = parser.parse_args()
 
-    if args.env_id:
-        os.environ["CHALK_ENVIRONMENT"] = args.env_id
     from chalkcompute import Image, ReadinessProbe, ScalingGroup
 
     image = (
@@ -81,13 +70,13 @@ def main() -> None:
 
     sg = ScalingGroup(
         image=image,
-        name=args.name,
-        gpu=args.gpu,
+        name='rgbd-slam',
+        gpu='nvidia-l4',
         cpu="4",
         memory="16Gi",
         env={
             "SLAM_SEQUENCE_DIR": f"/data/{SEQUENCE}",
-            "SLAM_STRIDE": str(args.stride),
+            "SLAM_STRIDE": str(2),
             "SLAM_INDEX_HTML": "/web/index.html",
         },
         entrypoint=ENTRYPOINT,
@@ -98,7 +87,7 @@ def main() -> None:
     )
     t0 = time.monotonic()
     try:
-        sg.deploy(build_timeout=2400.0, ready_timeout=args.ready_timeout)
+        sg.deploy(build_timeout=2400.0, ready_timeout=1800.0)
     finally:
         print(f"deploy returned after {time.monotonic() - t0:.0f}s")
     print("web_url:", sg.web_url)
